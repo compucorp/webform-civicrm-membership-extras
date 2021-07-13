@@ -695,6 +695,26 @@ function _webform_civicrm_membership_extras_prorated_billing_form_alter_handler(
   if (!_webform_civicrm_membership_extras_is_prorated_billing_enabled($form, $form_state, $membershipTypes)) {
     return;
   }
+
+  $form['#validate'][] = '_webform_civicrm_membership_extras_update_the_prorated_membership_items';
+}
+
+/**
+ * Gets the instalmentAmountCalculator.
+ *
+ * @param object $membershipType
+ * @param array $membershipDates
+ */
+function _webform_civicrm_membership_extras_get_instalment_amount_calculator($membershipType, $membershipDates) {
+  $calculator = new CRM_MembershipExtras_Service_MembershipPeriodType_FixedPeriodTypeCalculator([$membershipType]);
+  $calculator->setStartDate(new DateTime($membershipDates['start_date']));
+  $calculator->setEndDate(new DateTime($membershipDates['end_date']));
+  $calculator->setJoinDate(new DateTime($membershipDates['join_date']));
+
+  $instalmentAmountCalculator = new CRM_MembershipExtras_Service_MembershipInstalmentAmountCalculator($calculator);
+  $instalmentAmountCalculator->getCalculator()->calculate();
+
+  return $instalmentAmountCalculator;
 }
 
 /**
@@ -727,6 +747,69 @@ function _webform_civicrm_membership_extras_get_membership_types(&$form, &$form_
   }
 
   return $membership_type_added;
+}
+
+/**
+ * Gets the membership dates.
+ *
+ * If the number of terms set to be “Enter Dates Manually” then
+ *   get membership dates from the form inputs if possible.
+ * If not, then get the membership dates from
+ *
+ * @param array $form
+ * @param array $form_state
+ * @param array $membershipTypes
+ * @param array $membershipNamesAndKeysMap
+ */
+function _webform_civicrm_membership_extras_get_membership_dates(&$form, &$form_state, $membershipTypes, $membershipNamesAndKeysMap) {
+  foreach ($membershipTypes as $key => $membershipType) {
+    $membershipTypeDatesCalculator = new CRM_MembershipExtras_Service_MembershipTypeDatesCalculator();
+    $membership_dates_added[$key] = $membershipTypeDatesCalculator->getDatesForMembershipType(
+      $membershipType->id, NULL, NULL, NULL
+    );
+
+    // Sets the start date to NULL to use today as the start date.
+    $membership_dates_added[$key]['start_date'] = NULL;
+  }
+
+  return $membership_dates_added;
+}
+
+/**
+ * Calculates the prorated membership items.
+ *
+ * @param array $form
+ * @param array $form_state
+ */
+function _webform_civicrm_membership_extras_update_the_prorated_membership_items($form, &$form_state) {
+  $membershipTypes = _webform_civicrm_membership_extras_get_membership_types($form, $form_state);
+
+  $components = $form['#node']->webform['components'];
+  $membershipNamesAndKeysMap = [];
+  foreach ($membershipTypes as $key => $membershipType) {
+    $membership_number = explode('_membership_membership_type_id', $components[$key]['form_key'])[0];
+    $membershipNamesAndKeysMap[$membership_number] = $key;
+  }
+
+  $membershipDates = _webform_civicrm_membership_extras_get_membership_dates($form, $form_state, $membershipTypes, $membershipNamesAndKeysMap);
+  $line_items = &$form_state['civicrm']['line_items'];
+
+  // adjust the lineitems
+  $instalmentCount = 1;
+  foreach ($membershipTypes as $key => $membershipType) {
+    $instalmentAmountCalculator = _webform_civicrm_membership_extras_get_instalment_amount_calculator($membershipTypes[$key], $membershipDates[$key]);
+    $instalmentAmount = $instalmentAmountCalculator->calculateInstalmentAmount($instalmentCount);
+    $instalmentLineItems = $instalmentAmount->getLineItems();
+
+    foreach($line_items as $line_item_key => $item) {
+      if (isset($membershipNamesAndKeysMap[$item['element']]) && $membershipNamesAndKeysMap[$item['element']] === $key) {
+        $line_items[$line_item_key]['unit_price'] = $instalmentLineItems[0]->getUnitPrice();
+        $line_items[$line_item_key]['line_total'] = $instalmentLineItems[0]->getTotalAmount() - $instalmentLineItems[0]->getTaxAmount();
+        $line_items[$line_item_key]['tax_amount'] = $instalmentLineItems[0]->getTaxAmount();
+        $line_items[$line_item_key]['membership_type_id'] = $membershipTypes[$key]->id;
+      }
+    }
+  }
 }
 
 /**
