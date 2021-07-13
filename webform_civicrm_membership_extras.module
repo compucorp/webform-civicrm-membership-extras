@@ -59,6 +59,8 @@ function webform_civicrm_membership_extras_form_alter(&$form, &$form_state, $for
   if (strpos($form_id, 'webform_client_form_') !== FALSE) {
     wf_me_webform_client_form_alter_handler($form, $form_state, $form_id);
   }
+
+  _webform_civicrm_membership_extras_prorated_billing_form_alter_handler($form, $form_state, $form_id);
 }
 
 /**
@@ -671,4 +673,134 @@ function _membershipextras_getCiviWebformPostprocessorPropertyValue($node, $prop
   $entityReflectionObject = $civiWebformPostprocessorReflection->getProperty($propertyName);
   $entityReflectionObject->setAccessible(true);
   return $entityReflectionObject->getValue($civiWebformPostprocessor);
+}
+
+/**
+ * The function that alters the `webform_client_form_WEBFORMID`  form.
+ *
+ * @param array $form
+ * @param array $form_state
+ * @param string $form_id
+ */
+function _webform_civicrm_membership_extras_prorated_billing_form_alter_handler(&$form, &$form_state, $form_id) {
+  if (strpos($form_id, 'webform_client_form_') === FALSE) {
+    return;
+  }
+
+  if (!_membershipextras_isCivicrmWebform($form['#node'])) {
+    return;
+  }
+
+  $membershipTypes = _webform_civicrm_membership_extras_get_membership_types($form, $form_state);
+  if (!_webform_civicrm_membership_extras_is_prorated_billing_enabled($form, $form_state, $membershipTypes)) {
+    return;
+  }
+}
+
+/**
+ * Gets the membership types that user has selected.
+ *
+ * @param array $form
+ * @param array $form_state
+ */
+function _webform_civicrm_membership_extras_get_membership_types(&$form, &$form_state) {
+  $components = _webform_civicrm_membership_extras_get_components_by_part_of_form_key($form, '_membership_membership_type_id');
+  foreach ($components as $key => $component) {
+    // use array for membership_type ids because checkbox input allows mult-value.
+    $membership_type_ids = [];
+    foreach($form_state['input']['submitted'] as $fieldset) {
+      if (!empty($fieldset[$component['form_key']])) {
+        $membership_type_ids = $fieldset[$component['form_key']];
+        if (!is_array($membership_type_ids)) {
+          $membership_type_ids = [$membership_type_ids];
+        }
+        break;
+      }
+    }
+
+    foreach($membership_type_ids as $membership_type_id) {
+      if (empty($membership_type_id)) {
+        continue;
+      }
+      $membership_type_added[$key] = CRM_Member_BAO_MembershipType::findById($membership_type_id);
+    }
+  }
+
+  return $membership_type_added;
+}
+
+/**
+ * Checks whether prorated billing should be enabled or not.
+ *
+ * @param array $form
+ * @param array $form_state
+ * @param array $membershipTypes
+ *
+ * @return boolean
+ */
+function _webform_civicrm_membership_extras_is_prorated_billing_enabled($form, &$form_state, $membershipTypes) {
+  if (!_webform_civicrm_membership_extras_can_membershipextras_extension_do_prorated_billing()) {
+    return FALSE;
+  }
+
+  $areMembershipTypesFixed = TRUE;
+  foreach($membershipTypes as $membershipType) {
+    if($membershipType->period_type !== 'fixed') {
+      $areMembershipTypesFixed = FALSE;
+      break;
+    }
+  }
+  if (count($membershipTypes) < 1 || !$areMembershipTypesFixed) {
+    return FALSE;
+  }
+
+  $membershipSettings = $form['#node']->webform_civicrm['data']['membership'] ?? [];
+  $isNumberOfTermsIsOne = TRUE;
+  foreach($membershipSettings as $settings) {
+    foreach ($settings['membership'] as $membership_settings) {
+      if($membership_settings['num_terms'] > 1) {
+        $isNumberOfTermsIsOne = FALSE;
+         break 2;
+      }
+
+      // Don't do the pro-rata calculation if the user can manually select the
+      // number of terms.
+      if($membership_settings['num_terms'] === "") {
+        $isNumberOfTermsIsOne = FALSE;
+         break 2;
+      }
+    }
+  }
+  if (!$isNumberOfTermsIsOne) {
+    return FALSE;
+  }
+
+  $components = _webform_civicrm_membership_extras_get_components_by_part_of_form_key($form, '_membership_fee_amount');
+  if (count($components) > 0) {
+    return FALSE;
+  }
+
+  return TRUE;
+}
+
+function _webform_civicrm_membership_extras_get_components_by_part_of_form_key($form, $form_key) {
+  $components = $form['#node']->webform['components'];
+  $matched_components = [];
+  foreach ($components as $key => $component) {
+    if (strpos($component['form_key'], $form_key) !== FALSE) {
+      $matched_components[$key] = $component;
+    }
+  }
+
+  return $matched_components;
+}
+
+/**
+ * Checks whether uk.co.compucorp.membershipextras extension has the pro rata
+ * calculation functionality.
+ *
+ * @return bool
+ */
+function _webform_civicrm_membership_extras_can_membershipextras_extension_do_prorated_billing() {
+  return class_exists('CRM_MembershipExtras_Service_MembershipInstalmentAmountCalculator');
 }
