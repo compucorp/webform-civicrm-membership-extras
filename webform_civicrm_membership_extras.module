@@ -762,14 +762,94 @@ function _webform_civicrm_membership_extras_get_membership_types(&$form, &$form_
  * @param array $membershipNamesAndKeysMap
  */
 function _webform_civicrm_membership_extras_get_membership_dates(&$form, &$form_state, $membershipTypes, $membershipNamesAndKeysMap) {
+  $membership_dates_added = [];
+  $components = _webform_civicrm_membership_extras_get_components_by_part_of_form_key($form, '_membership_start_date');
+  foreach ($components as $key => $component) {
+    $start_date = 0;
+    foreach($form_state['input']['submitted'] as $fieldset) {
+      $day = $fieldset[$component['form_key']]['day'] ?? 0;
+      $month = $fieldset[$component['form_key']]['month'] ?? 0;
+      $year = $fieldset[$component['form_key']]['year'] ?? 0;
+      if ($day && $month && $year) {
+        $start_date = intval($year) . "-" . intval($month) . "-" . intval($day);
+      }
+    }
+
+    if (empty($start_date)) {
+      continue;
+    }
+    $membership_number = explode('_membership_start_date', $component['form_key'])[0];
+    $membership_type_key = $membershipNamesAndKeysMap[$membership_number];
+    $membership_dates_added[$membership_type_key]['start_date'] = $start_date;
+  }
+
+  $components = _webform_civicrm_membership_extras_get_components_by_part_of_form_key($form, '_membership_end_date');
+  foreach ($components as $key => $component) {
+    $end_date = 0;
+    foreach($form_state['input']['submitted'] as $fieldset) {
+      $day = $fieldset[$component['form_key']]['day'] ?? 0;
+      $month = $fieldset[$component['form_key']]['month'] ?? 0;
+      $year = $fieldset[$component['form_key']]['year'] ?? 0;
+      if ($day && $month && $year) {
+        $end_date = intval($year) . "-" . intval($month) . "-" . intval($day);
+      }
+    }
+
+    if (empty($end_date)) {
+      continue;
+    }
+    $membership_number = explode('_membership_end_date', $component['form_key'])[0];
+    $membership_type_key = $membershipNamesAndKeysMap[$membership_number];
+    $membership_dates_added[$membership_type_key]['end_date'] = $end_date;
+  }
+
+  $components = _webform_civicrm_membership_extras_get_components_by_part_of_form_key($form, '_membership_join_date');
+  foreach ($components as $key => $component) {
+    $join_date = 0;
+    foreach($form_state['input']['submitted'] as $fieldset) {
+      $day = $fieldset[$component['form_key']]['day'] ?? 0;
+      $month = $fieldset[$component['form_key']]['month'] ?? 0;
+      $year = $fieldset[$component['form_key']]['year'] ?? 0;
+      if ($day && $month && $year) {
+        $join_date = intval($year) . "-" . intval($month) . "-" . intval($day);
+      }
+    }
+
+    if (empty($join_date)) {
+      continue;
+    }
+    $membership_number = explode('_membership_join_date', $component['form_key'])[0];
+    $membership_type_key = $membershipNamesAndKeysMap[$membership_number];
+    $membership_dates_added[$membership_type_key]['join_date'] = $join_date;
+  }
+
+  // Prefills membrship dates with NULL if the user didn't fill all the fields.
+  foreach ($membership_dates_added as $key => $membership_date) {
+    $membership_dates_added[$key]['start_date'] = $membership_date['start_date'] ?? NULL;
+    $membership_dates_added[$key]['end_date'] = $membership_date['end_date'] ?? NULL;
+    $membership_dates_added[$key]['join_date'] = $membership_date['join_date'] ?? NULL;
+  }
+
   foreach ($membershipTypes as $key => $membershipType) {
+    $dates = $membership_dates_added[$key];
+    foreach ($dates as $label => $date) {
+      if ($dates[$label]) {
+          $dates[$label] =  new DateTime($dates[$label]);
+      }
+    }
+
     $membershipTypeDatesCalculator = new CRM_MembershipExtras_Service_MembershipTypeDatesCalculator();
     $membership_dates_added[$key] = $membershipTypeDatesCalculator->getDatesForMembershipType(
-      $membershipType->id, NULL, NULL, NULL
+      $membershipType->id,
+      $dates['start_date'],
+      $dates['end_date'],
+      $dates['join_date']
     );
 
-    // Sets the start date to NULL to use today as the start date.
-    $membership_dates_added[$key]['start_date'] = NULL;
+    // Sets the start date to NULL to use today as the start date if the user didn't fill it.
+    if (!$dates['start_date']) {
+      $membership_dates_added[$key]['start_date'] = NULL;
+    }
   }
 
   return $membership_dates_added;
