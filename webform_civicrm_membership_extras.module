@@ -45,6 +45,7 @@ function webform_civicrm_membership_extras_civicrm_apiWrappers(&$wrappers, $apiR
 
   // Add custom civicrm api wrapper to alter line item price
   $wrappers[] = new wf_me_discount_civicrm_apiwrapper();
+  $wrappers[] = new wf_me_prorated_billing_apiwrapper();
 }
 
 
@@ -697,6 +698,42 @@ function _webform_civicrm_membership_extras_prorated_billing_form_alter_handler(
   }
 
   $form['#validate'][] = '_webform_civicrm_membership_extras_update_the_prorated_membership_items';
+  $form['#validate'][] = '_webform_civicrm_membership_extras_set_prorated_membership_items_in_session';
+
+  // The `wf_me_prorated_billing_apiwrapper` modifies the response for the get
+  // method of the membership_type.get API to allow the minimum fee to be set
+  // correctly for prorated memberships based on data stored in session.
+  // This behavior is by default disabled and can only be enabled by calling
+  // the method `_webform_civicrm_membership_extras_enable_prorated_billing`.
+  // If the user reached the last step , reviewed the confirmation page
+  // details and clicked submit, the
+  // `_webform_civicrm_membership_extras_enable_prorated_billing` function will
+  // be called to allow wf_me_prorated_billing_apiwrapper to replace membership
+  // fee with the new adjusted value that was saved in the session.
+  // After webform_civicrm extension have done its work to save the prorated
+  // membership fees, the
+  // `_webform_civicrm_membership_extras_disable_prorated_billing` function
+  // will be called to stop replacing the membership fee with the new adjusted
+  // value that was saved in the session.
+  // The _webform_civicrm_membership_extras_clear_prorated_billing_related_data
+  // function will delete any data stored in the session.
+  $page_num = $form['details']['page_num']['#value'];
+  $page_count = $form['details']['page_count']['#value'];
+  $isWebformConfirmationPage = $page_num === $page_count;
+  if ($isWebformConfirmationPage) {
+    $validate_callbacks = $form['#validate'];
+    $form['#validate'] = array();
+    foreach ($validate_callbacks as $validate_callback) {
+      if ($validate_callback == 'wf_crm_validate') {
+        $form['#validate'][] = '_webform_civicrm_membership_extras_enable_prorated_billing';
+        $form['#validate'][] = $validate_callback;
+        $form['#validate'][] = '_webform_civicrm_membership_extras_disable_prorated_billing';
+        $form['#validate'][] = '_webform_civicrm_membership_extras_clear_prorated_billing_related_data';
+      } else {
+        $form['#validate'][] = $validate_callback;
+      }
+    }
+  }
 }
 
 /**
@@ -944,6 +981,62 @@ function _webform_civicrm_membership_extras_is_prorated_billing_enabled($form, &
   }
 
   return TRUE;
+}
+
+/**
+ * Adds webform prorated membership items to session.
+ *
+ * This is used in wf_me_prorated_billing_apiwrapper to alter line item price
+ * when returning items that have already been prorated.
+ *
+ * @param array $form
+ * @param array $form_state
+ */
+function _webform_civicrm_membership_extras_set_prorated_membership_items_in_session($form, &$form_state) {
+  $membership_type_added = array();
+  foreach ($form_state['civicrm']['line_items'] as $item) {
+    if (isset($item['membership_type_id'])) {
+      $membership_type_added[$item['membership_type_id']] = $item['unit_price'];
+    }
+  }
+
+  $_SESSION['webform_prorated_billing']['membership_types'] = $membership_type_added;
+}
+
+/**
+ * Enables prorated billing.
+ *
+ * This is used in wf_me_prorated_billing_apiwrapper to alter line item price
+ * when returning items that have already been prorated.
+ *
+ * @param array $form
+ * @param array $form_state
+ */
+function _webform_civicrm_membership_extras_enable_prorated_billing($line_items) {
+  $_SESSION['webform_prorated_billing']['is_enabled'] = TRUE;
+}
+
+/**
+ * Disables prorated billing.
+ *
+ * This is used in wf_me_prorated_billing_apiwrapper to alter line item price
+ * when returning items that have already been prorated.
+ *
+ * @param array $form
+ * @param array $form_state
+ */
+function _webform_civicrm_membership_extras_disable_prorated_billing($line_items) {
+  $_SESSION['webform_prorated_billing']['is_enabled'] = FALSE;
+}
+
+/**
+ * Clears general pro rata related data stored in form state and in session.
+ *
+ * @param array $form
+ * @param array $form_state
+ */
+function _webform_civicrm_membership_extras_clear_prorated_billing_related_data($form, &$form_state) {
+  unset($_SESSION['webform_prorated_billing']);
 }
 
 function _webform_civicrm_membership_extras_get_components_by_part_of_form_key($form, $form_key) {
