@@ -44,8 +44,10 @@ function webform_civicrm_membership_extras_civicrm_apiWrappers(&$wrappers, $apiR
   }
 
   // Add custom civicrm api wrapper to alter line item price
-  $wrappers[] = new wf_me_discount_civicrm_apiwrapper();
-  $wrappers[] = new wf_me_prorated_billing_apiwrapper();
+  if (class_exists('wf_me_discount_civicrm_apiwrapper') && class_exists('wf_me_prorated_billing_apiwrapper')) {
+    $wrappers[] = new wf_me_discount_civicrm_apiwrapper();
+    $wrappers[] = new wf_me_prorated_billing_apiwrapper();
+  }
 }
 
 
