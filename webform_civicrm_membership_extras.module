@@ -45,6 +45,14 @@ function webform_civicrm_membership_extras_civicrm_apiWrappers(&$wrappers, $apiR
 
   // Add custom civicrm api wrapper to alter line item price
   $wrappers[] = new wf_me_discount_civicrm_apiwrapper();
+
+  // The deployment failed because the following class wasn't loaded.
+  // I think it is related to the cache wasn't cleared and hence no re-read
+  // for the info file to load the following file.
+  if (class_exists('wf_me_prorated_billing_apiwrapper')) {
+    $wrappers[] = new wf_me_prorated_billing_apiwrapper();
+  }
+
 }
 
 
@@ -59,6 +67,8 @@ function webform_civicrm_membership_extras_form_alter(&$form, &$form_state, $for
   if (strpos($form_id, 'webform_client_form_') !== FALSE) {
     wf_me_webform_client_form_alter_handler($form, $form_state, $form_id);
   }
+
+  _webform_civicrm_membership_extras_prorated_billing_form_alter_handler($form, $form_state, $form_id);
 }
 
 /**
@@ -671,4 +681,374 @@ function _membershipextras_getCiviWebformPostprocessorPropertyValue($node, $prop
   $entityReflectionObject = $civiWebformPostprocessorReflection->getProperty($propertyName);
   $entityReflectionObject->setAccessible(true);
   return $entityReflectionObject->getValue($civiWebformPostprocessor);
+}
+
+/**
+ * The function that alters the `webform_client_form_WEBFORMID`  form.
+ *
+ * @param array $form
+ * @param array $form_state
+ * @param string $form_id
+ */
+function _webform_civicrm_membership_extras_prorated_billing_form_alter_handler(&$form, &$form_state, $form_id) {
+  if (strpos($form_id, 'webform_client_form_') === FALSE) {
+    return;
+  }
+
+  if (!_membershipextras_isCivicrmWebform($form['#node'])) {
+    return;
+  }
+
+  $membershipTypes = _webform_civicrm_membership_extras_get_membership_types($form, $form_state);
+  if (!_webform_civicrm_membership_extras_is_prorated_billing_enabled($form, $form_state, $membershipTypes)) {
+    return;
+  }
+
+  $form['#validate'][] = '_webform_civicrm_membership_extras_update_the_prorated_membership_items';
+  $form['#validate'][] = '_webform_civicrm_membership_extras_set_prorated_membership_items_in_session';
+
+  // The `wf_me_prorated_billing_apiwrapper` modifies the response for the get
+  // method of the membership_type.get API to allow the minimum fee to be set
+  // correctly for prorated memberships based on data stored in session.
+  // This behavior is by default disabled and can only be enabled by calling
+  // the method `_webform_civicrm_membership_extras_enable_prorated_billing`.
+  // If the user reached the last step , reviewed the confirmation page
+  // details and clicked submit, the
+  // `_webform_civicrm_membership_extras_enable_prorated_billing` function will
+  // be called to allow wf_me_prorated_billing_apiwrapper to replace membership
+  // fee with the new adjusted value that was saved in the session.
+  // After webform_civicrm extension have done its work to save the prorated
+  // membership fees, the
+  // `_webform_civicrm_membership_extras_disable_prorated_billing` function
+  // will be called to stop replacing the membership fee with the new adjusted
+  // value that was saved in the session.
+  // The _webform_civicrm_membership_extras_clear_prorated_billing_related_data
+  // function will delete any data stored in the session.
+  $page_num = $form['details']['page_num']['#value'];
+  $page_count = $form['details']['page_count']['#value'];
+  $isWebformConfirmationPage = $page_num === $page_count;
+  if ($isWebformConfirmationPage) {
+    $validate_callbacks = $form['#validate'];
+    $form['#validate'] = array();
+    foreach ($validate_callbacks as $validate_callback) {
+      if ($validate_callback == 'wf_crm_validate') {
+        $form['#validate'][] = '_webform_civicrm_membership_extras_enable_prorated_billing';
+        $form['#validate'][] = $validate_callback;
+        $form['#validate'][] = '_webform_civicrm_membership_extras_disable_prorated_billing';
+        $form['#validate'][] = '_webform_civicrm_membership_extras_clear_prorated_billing_related_data';
+      } else {
+        $form['#validate'][] = $validate_callback;
+      }
+    }
+  }
+}
+
+/**
+ * Gets the instalmentAmountCalculator.
+ *
+ * @param object $membershipType
+ * @param array $membershipDates
+ */
+function _webform_civicrm_membership_extras_get_instalment_amount_calculator($membershipType, $membershipDates) {
+  $calculator = new CRM_MembershipExtras_Service_MembershipPeriodType_FixedPeriodTypeCalculator([$membershipType]);
+  $calculator->setStartDate(new DateTime($membershipDates['start_date']));
+  $calculator->setEndDate(new DateTime($membershipDates['end_date']));
+  $calculator->setJoinDate(new DateTime($membershipDates['join_date']));
+
+  $instalmentAmountCalculator = new CRM_MembershipExtras_Service_MembershipInstalmentAmountCalculator($calculator);
+  $instalmentAmountCalculator->getCalculator()->calculate();
+
+  return $instalmentAmountCalculator;
+}
+
+/**
+ * Gets the membership types that user has selected.
+ *
+ * @param array $form
+ * @param array $form_state
+ */
+function _webform_civicrm_membership_extras_get_membership_types(&$form, &$form_state) {
+  $components = _webform_civicrm_membership_extras_get_components_by_part_of_form_key($form, '_membership_membership_type_id');
+  foreach ($components as $key => $component) {
+    // use array for membership_type ids because checkbox input allows mult-value.
+    $membership_type_ids = [];
+    foreach($form_state['input']['submitted'] as $fieldset) {
+      if (!empty($fieldset[$component['form_key']])) {
+        $membership_type_ids = $fieldset[$component['form_key']];
+        if (!is_array($membership_type_ids)) {
+          $membership_type_ids = [$membership_type_ids];
+        }
+        break;
+      }
+    }
+
+    foreach($membership_type_ids as $membership_type_id) {
+      if (empty($membership_type_id)) {
+        continue;
+      }
+      $membership_type_added[$key] = CRM_Member_BAO_MembershipType::findById($membership_type_id);
+    }
+  }
+
+  return $membership_type_added;
+}
+
+/**
+ * Gets the membership dates from inputs.
+ *
+ * @param array $form
+ * @param array $form_state
+ * @param string $date_name
+ */
+function _webform_civicrm_membership_extras_get_membership_dates_from_inputs_by_name(&$form, &$form_state, $date_name) {
+  $dates = [];
+  $part_of_form_key = "_membership_$date_name";
+  $components = _webform_civicrm_membership_extras_get_components_by_part_of_form_key($form, $part_of_form_key);
+  foreach ($components as $key => $component) {
+    $date = 0;
+    foreach($form_state['input']['submitted'] as $fieldset) {
+      $day = $fieldset[$component['form_key']]['day'] ?? 0;
+      $month = $fieldset[$component['form_key']]['month'] ?? 0;
+      $year = $fieldset[$component['form_key']]['year'] ?? 0;
+      if ($day && $month && $year) {
+        $date = intval($year) . "-" . intval($month) . "-" . intval($day);
+      }
+    }
+
+    if (empty($date)) {
+      continue;
+    }
+    $membership_number = explode($part_of_form_key, $component['form_key'])[0];
+    $dates[$membership_number] = $date;
+  }
+
+  return $dates;
+}
+
+/**
+ * Merges membership dates by membership form key.
+ *
+ * @param array $membership_dates_added
+ * @param array $membershipNamesAndKeysMap
+ */
+function _webform_civicrm_membership_extras_merge_membership_dates_by_membership_form_key($membership_dates_added, $membershipNamesAndKeysMap) {
+  $result = [];
+
+  foreach($membership_dates_added as $membership_date_label => $dates) {
+    foreach ($dates as $membership_number => $date) {
+      $membership_type_key = $membershipNamesAndKeysMap[$membership_number];
+      $result[$membership_type_key][$membership_date_label] = $date;
+    }
+  }
+
+  // Prefills membrship dates with NULL if the user didn't fill all the fields.
+  foreach ($result as $key => $membership_date) {
+    $result[$key]['start_date'] = $membership_date['start_date'] ?? NULL;
+    $result[$key]['end_date'] = $membership_date['end_date'] ?? NULL;
+    $result[$key]['join_date'] = $membership_date['join_date'] ?? NULL;
+  }
+
+  return $result;
+}
+
+/**
+ * Gets the membership dates.
+ *
+ * If the number of terms set to be “Enter Dates Manually” then get membership
+ * dates from the form inputs if possible. If not, then get the membership
+ * dates from the membership type.
+ *
+ * @param array $form
+ * @param array $form_state
+ * @param array $membershipTypes
+ * @param array $membershipNamesAndKeysMap
+ */
+function _webform_civicrm_membership_extras_get_membership_dates(&$form, &$form_state, $membershipTypes, $membershipNamesAndKeysMap) {
+  $membership_dates_added = [
+    'start_date' => _webform_civicrm_membership_extras_get_membership_dates_from_inputs_by_name($form, $form_state, 'start_date'),
+    'end_date' => _webform_civicrm_membership_extras_get_membership_dates_from_inputs_by_name($form, $form_state, 'end_date'),
+    'join_date' => _webform_civicrm_membership_extras_get_membership_dates_from_inputs_by_name($form, $form_state, 'join_date'),
+  ];
+
+  $membership_dates_added =
+    _webform_civicrm_membership_extras_merge_membership_dates_by_membership_form_key($membership_dates_added, $membershipNamesAndKeysMap);
+
+  foreach ($membershipTypes as $key => $membershipType) {
+    $dates = $membership_dates_added[$key];
+    foreach ($dates as $label => $date) {
+      if ($dates[$label]) {
+          $dates[$label] =  new DateTime($dates[$label]);
+      }
+    }
+
+    $membershipTypeDatesCalculator = new CRM_MembershipExtras_Service_MembershipTypeDatesCalculator();
+    $membership_dates_added[$key] = $membershipTypeDatesCalculator->getDatesForMembershipType(
+      $membershipType->id,
+      $dates['start_date'],
+      $dates['end_date'],
+      $dates['join_date']
+    );
+
+    // Sets the start date to NULL to use today as the start date if the user didn't fill it.
+    if (!$dates['start_date']) {
+      $membership_dates_added[$key]['start_date'] = NULL;
+    }
+  }
+
+  return $membership_dates_added;
+}
+
+/**
+ * Calculates the prorated membership items.
+ *
+ * @param array $form
+ * @param array $form_state
+ */
+function _webform_civicrm_membership_extras_update_the_prorated_membership_items($form, &$form_state) {
+  $membershipTypes = _webform_civicrm_membership_extras_get_membership_types($form, $form_state);
+
+  $components = $form['#node']->webform['components'];
+  $membershipNamesAndKeysMap = [];
+  foreach ($membershipTypes as $key => $membershipType) {
+    $membership_number = explode('_membership_membership_type_id', $components[$key]['form_key'])[0];
+    $membershipNamesAndKeysMap[$membership_number] = $key;
+  }
+
+  $membershipDates = _webform_civicrm_membership_extras_get_membership_dates($form, $form_state, $membershipTypes, $membershipNamesAndKeysMap);
+  $line_items = &$form_state['civicrm']['line_items'];
+
+  // adjust the lineitems
+  $instalmentCount = 1;
+  foreach ($membershipTypes as $key => $membershipType) {
+    $instalmentAmountCalculator = _webform_civicrm_membership_extras_get_instalment_amount_calculator($membershipTypes[$key], $membershipDates[$key]);
+    $instalmentAmount = $instalmentAmountCalculator->calculateInstalmentAmount($instalmentCount);
+    $instalmentLineItems = $instalmentAmount->getLineItems();
+
+    foreach($line_items as $line_item_key => $item) {
+      if (isset($membershipNamesAndKeysMap[$item['element']]) && $membershipNamesAndKeysMap[$item['element']] === $key) {
+        $line_items[$line_item_key]['unit_price'] = $instalmentLineItems[0]->getUnitPrice();
+        $line_items[$line_item_key]['line_total'] = $instalmentLineItems[0]->getTotalAmount() - $instalmentLineItems[0]->getTaxAmount();
+        $line_items[$line_item_key]['tax_amount'] = $instalmentLineItems[0]->getTaxAmount();
+        $line_items[$line_item_key]['membership_type_id'] = $membershipTypes[$key]->id;
+      }
+    }
+  }
+}
+
+/**
+ * Checks whether prorated billing should be enabled or not.
+ *
+ * @param array $form
+ * @param array $form_state
+ * @param array $membershipTypes
+ *
+ * @return boolean
+ */
+function _webform_civicrm_membership_extras_is_prorated_billing_enabled($form, &$form_state, $membershipTypes) {
+  $areMembershipTypesFixed = TRUE;
+  foreach($membershipTypes as $membershipType) {
+    if($membershipType->period_type !== 'fixed') {
+      $areMembershipTypesFixed = FALSE;
+      break;
+    }
+  }
+  if (count($membershipTypes) < 1 || !$areMembershipTypesFixed) {
+    return FALSE;
+  }
+
+  $membershipSettings = $form['#node']->webform_civicrm['data']['membership'] ?? [];
+  $isNumberOfTermsIsOne = TRUE;
+  foreach($membershipSettings as $settings) {
+    foreach ($settings['membership'] as $membership_settings) {
+      if($membership_settings['num_terms'] > 1) {
+        $isNumberOfTermsIsOne = FALSE;
+         break 2;
+      }
+
+      // Don't do the pro-rata calculation if the user can manually select the
+      // number of terms.
+      if($membership_settings['num_terms'] === "") {
+        $isNumberOfTermsIsOne = FALSE;
+         break 2;
+      }
+    }
+  }
+  if (!$isNumberOfTermsIsOne) {
+    return FALSE;
+  }
+
+  $components = _webform_civicrm_membership_extras_get_components_by_part_of_form_key($form, '_membership_fee_amount');
+  if (count($components) > 0) {
+    return FALSE;
+  }
+
+  return TRUE;
+}
+
+/**
+ * Adds webform prorated membership items to session.
+ *
+ * This is used in wf_me_prorated_billing_apiwrapper to alter line item price
+ * when returning items that have already been prorated.
+ *
+ * @param array $form
+ * @param array $form_state
+ */
+function _webform_civicrm_membership_extras_set_prorated_membership_items_in_session($form, &$form_state) {
+  $membership_type_added = array();
+  foreach ($form_state['civicrm']['line_items'] as $item) {
+    if (isset($item['membership_type_id'])) {
+      $membership_type_added[$item['membership_type_id']] = $item['unit_price'];
+    }
+  }
+
+  $_SESSION['webform_prorated_billing']['membership_types'] = $membership_type_added;
+}
+
+/**
+ * Enables prorated billing.
+ *
+ * This is used in wf_me_prorated_billing_apiwrapper to alter line item price
+ * when returning items that have already been prorated.
+ *
+ * @param array $form
+ * @param array $form_state
+ */
+function _webform_civicrm_membership_extras_enable_prorated_billing($line_items) {
+  $_SESSION['webform_prorated_billing']['is_enabled'] = TRUE;
+}
+
+/**
+ * Disables prorated billing.
+ *
+ * This is used in wf_me_prorated_billing_apiwrapper to alter line item price
+ * when returning items that have already been prorated.
+ *
+ * @param array $form
+ * @param array $form_state
+ */
+function _webform_civicrm_membership_extras_disable_prorated_billing($line_items) {
+  $_SESSION['webform_prorated_billing']['is_enabled'] = FALSE;
+}
+
+/**
+ * Clears general pro rata related data stored in form state and in session.
+ *
+ * @param array $form
+ * @param array $form_state
+ */
+function _webform_civicrm_membership_extras_clear_prorated_billing_related_data($form, &$form_state) {
+  unset($_SESSION['webform_prorated_billing']);
+}
+
+function _webform_civicrm_membership_extras_get_components_by_part_of_form_key($form, $form_key) {
+  $components = $form['#node']->webform['components'];
+  $matched_components = [];
+  foreach ($components as $key => $component) {
+    if (strpos($component['form_key'], $form_key) !== FALSE) {
+      $matched_components[$key] = $component;
+    }
+  }
+
+  return $matched_components;
 }

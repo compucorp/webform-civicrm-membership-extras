@@ -11,3 +11,4 @@ files[] = includes/wf_me_discount_settings.inc
 files[] = includes/wf_me_discount_code_validator.inc
 files[] = includes/wf_me_discount_amount_helper.inc
 files[] = includes/wf_me_discount_civicrm_apiwrapper.inc
+files[] = includes/wf_me_prorated_billing_apiwrapper.inc
